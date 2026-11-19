@@ -133,6 +133,16 @@ function formatAmount(rawAmount, decimals) {
   return `${whole}.${fracStr}`;
 }
 
+// An SPL token account balance (a getTokenAccountBalance `value`) in the units
+// parseAmount reads: base units / 10^decimals. Not the RPC's uiAmountString,
+// which for a Token-2022 mint with the ScaledUiAmount or InterestBearing
+// extension is the balance times the mint's multiplier, so a --max send of it
+// asks for a different amount than the account holds (more, for xStocks such
+// as AAPLx).
+function formatSplBalance(balance, decimals) {
+  return formatAmount(BigInt(balance.amount), decimals);
+}
+
 // ============= RPC =============
 
 async function rpcCall(url, method, params = [], context = {}) {
@@ -527,7 +537,7 @@ export async function buildUnsignedSolanaTransaction({ to, amount, amountStr, to
       const ataInfo = await rpcCall(rpcUrl, 'getTokenAccountBalance', [sourceAtaAddr]);
       const tokenBalance = BigInt(ataInfo.value.amount);
       if (tokenBalance < tokenAmount) {
-        throw new Error(`Insufficient token balance: have ${ataInfo.value.uiAmountString}, need ${amountStr}`);
+        throw new Error(`Insufficient token balance: have ${formatSplBalance(ataInfo.value, decimals)}, need ${amountStr}`);
       }
     } catch (e) {
       if (e.message.includes('Insufficient')) throw e;
@@ -819,7 +829,7 @@ async function sendTokensViaPrivy({ to, amount, chain, token, max, dryRun, walle
         const sourceATA = deriveATA(fromAddress, token, tokenProgram);
         const sourceAtaAddr = base58Encode(sourceATA);
         const ataInfo = await rpcCall(rpcUrl, 'getTokenAccountBalance', [sourceAtaAddr]);
-        amount = ataInfo.value.uiAmountString;
+        amount = formatSplBalance(ataInfo.value, decimals);
       }
       // The SPL amount is otherwise parsed only while building the transaction,
       // after the dry-run return. Parse it here so a preview refuses the same
@@ -962,11 +972,11 @@ export async function sendTokens({ to, amount, chain, token = null, wallet = nul
     } else if (max && token) {
       // Max SPL: full token balance
       const rpcUrl = CHAIN_RPCS.solana;
-      const { tokenProgram, decimals: _decimals } = await getTokenInfo(rpcUrl, token);
+      const { tokenProgram, decimals } = await getTokenInfo(rpcUrl, token);
       const sourceATA = deriveATA(walletData.solana.address, token, tokenProgram);
       const sourceAtaAddr = base58Encode(sourceATA);
       const ataInfo = await rpcCall(rpcUrl, 'getTokenAccountBalance', [sourceAtaAddr]);
-      amount = ataInfo.value.uiAmountString;
+      amount = formatSplBalance(ataInfo.value, decimals);
       stderr(`  Max send: ${amount} (SPL token)`);
     }
     const amountRaw = token ? null : parseAmount(amount, 9);
