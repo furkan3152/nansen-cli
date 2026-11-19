@@ -17,7 +17,7 @@
  *      going direct, the CLI has to catch it itself.
  */
 
-import { CommandError } from "./api.js";
+import { CommandError, transportFailure } from "./api.js";
 // The base URL and network live in hl-env.js so hl-action.js can resolve the
 // network without importing this module (it builds actions; this one submits
 // them). Re-exported here because this is where callers expect to find them.
@@ -29,6 +29,12 @@ export {
 } from "./hl-env.js";
 
 import { hlApiUrl } from "./hl-env.js";
+
+// Transport failures that happen before a connection exists (the host name did
+// not resolve, or the connection was refused), so the signed action never left
+// this machine. Any other failure, such as a reset or a closed socket, can
+// happen after Hyperliquid has read the whole request and applied it.
+const NOT_SENT_FAILURES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"]);
 
 function exchangeError(message, code, exchangeResult) {
   const error = new CommandError(message, code);
@@ -113,15 +119,35 @@ export async function submitExchange(
         "HL_TIMEOUT_INDETERMINATE"
       );
     }
+    // Only a failure that proves nothing was sent is reported as "could not
+    // reach". A connection lost after the request went out is as indeterminate
+    // as a timeout: the order may be live, and a retry would place it twice.
+    const reason = transportFailure(err);
+    if (NOT_SENT_FAILURES.has(reason)) {
+      throw new CommandError(
+        `Could not reach Hyperliquid (${reason}); the action was not sent.`,
+        "HL_NETWORK_ERROR"
+      );
+    }
     throw new CommandError(
-      `Could not reach Hyperliquid: ${err.message}`,
-      "HL_NETWORK_ERROR"
+      `The connection to Hyperliquid failed (${reason}) after the request may have been sent — the action may or may not have been applied. Check "nansen perp orders" and "nansen perp positions" before retrying.`,
+      "HL_TIMEOUT_INDETERMINATE"
     );
   } finally {
     clearTimeout(timer);
   }
 
-  const text = await response.text();
+  // The response headers arrived, so Hyperliquid has the request. A connection
+  // lost while the body is read leaves the outcome just as unknown.
+  let text;
+  try {
+    text = await response.text();
+  } catch (err) {
+    throw new CommandError(
+      `The connection to Hyperliquid failed (${transportFailure(err)}) while its response was read — the action may or may not have been applied. Check "nansen perp orders" and "nansen perp positions" before retrying.`,
+      "HL_TIMEOUT_INDETERMINATE"
+    );
+  }
   let data;
   try {
     data = JSON.parse(text);
